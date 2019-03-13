@@ -1,67 +1,44 @@
-#FROM balenalib/rpi-raspbian:jessie
-FROM jsurf/rpi-raspbian:latest
+# Build image cmd: docker build -t debian-mysql-server-5.7 .
 
-RUN [ "cross-build-start" ]
-
-ENV LANG C.UTF-8
-ENV TZ Europe/Berlin
+FROM debian:sid
 
 # add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
-RUN groupadd -r mysql && useradd -r -g mysql mysql
-
-# add gosu for easy step-down from root
-ENV GOSU_VERSION 1.10
-RUN set -x \
-    && apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/* \
-    && wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$(dpkg --print-architecture)" \
-    && wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$(dpkg --print-architecture).asc" \
-    && export GNUPGHOME="$(mktemp -d)" \
-    && gpg --keyserver ha.pool.sks-keyservers.net --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4 \
-    && gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu \
-    && rm -r "$GNUPGHOME" /usr/local/bin/gosu.asc \
-    && chmod +x /usr/local/bin/gosu \
-    && gosu nobody true \
-    && apt-get purge -y --auto-remove ca-certificates wget
-
-RUN mkdir /docker-entrypoint-initdb.d
-
-# FATAL ERROR: please install the following Perl modules before executing /usr/local/mysql/scripts/mysql_install_db:
-# File::Basename
-# File::Copy
-# Sys::Hostname
-# Data::Dumper
-RUN apt-get update && apt-get install -y perl pwgen --no-install-recommends && rm -rf /var/lib/apt/lists/*
-
-ENV MYSQL_VERSION 5.7.*
-
-# the "/var/lib/mysql" stuff here is because the mysql-server postinst doesn't have an explicit way to disable the mysql_install_db codepath besides having a database already "configured" (ie, stuff in /var/lib/mysql/mysql)
-# also, we set debconf keys to make APT a little quieter
-RUN { \
-    echo mysql-community-server mysql-community-server/data-dir select ''; \
-    echo mysql-community-server mysql-community-server/root-pass password ''; \
-    echo mysql-community-server mysql-community-server/re-root-pass password ''; \
-    echo mysql-community-server mysql-community-server/remove-test-db select false; \
-    } | debconf-set-selections \
-    && apt-get update && apt-get install -y mysql-server="${MYSQL_VERSION}" && rm -rf /var/lib/apt/lists/* \
+RUN groupadd -r mysql && useradd -r -g mysql mysql \
+    \
+    && printf "\nalias ll='ls -l'\nalias l='ls -lA'\n" >> /root/.bashrc \
+    # Map Ctrl-Up and Ctrl-Down to history based bash completion
+    && printf '"\\e[1;5A": history-search-backward\n"\\e[1;5B": history-search-forward\n"\\e[1;5C": forward-word\n"\\e[1;5D": backward-word' > /etc/inputrc \
+    \
+    && apt-get update \
+    # Install minimal admin utils
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y apt-utils less nano procps \
+    # Install MySQL server
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpwquality-tools mysql-server-5.7 \
+    # Clean cache
+    && rm -rf /var/lib/apt/lists/* \
+    \
     && rm -rf /var/lib/mysql && mkdir -p /var/lib/mysql /var/run/mysqld \
-    && chown -R mysql:mysql /var/lib/mysql /var/run/mysqld \
-    # ensure that /var/run/mysqld (used for socket and lock files) is writable regardless of the UID our mysqld instance ends up having at runtime
-    && chmod 777 /var/run/mysqld
-
-# comment out a few problematic configuration values
-# don't reverse lookup hostnames, they are usually another container
-RUN sed -Ei 's/^(bind-address|log)/#&/' /etc/mysql/my.cnf \
-    && echo '[mysqld]\nskip-host-cache\nskip-name-resolve' > /etc/mysql/conf.d/docker.cnf
-
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-RUN ln -s usr/local/bin/docker-entrypoint.sh /entrypoint.sh # backwards compat
-
-RUN [ "cross-build-end" ]
+    && touch /var/log/mysqld.log \
+    && chown -R mysql:mysql /var/lib/mysql /var/run/mysqld /var/log/mysqld.log \
+    # Ensure that /var/run/mysqld (used for socket and lock files) is writable regardless of the UID our mysqld instance ends up having at runtime
+    && chmod 777 /var/run/mysqld \
+    && chmod 775 /var/log \
+    # Disable Debian MySQL config since it overwrites config from volume
+    #&& mv /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf.disabled \
+    #&& mv /etc/mysql/conf.d/mysqldump.cnf /etc/mysql/conf.d/mysqldump.cnf.disabled \
+    #&& mv /etc/mysql/conf.d/mysql.cnf /etc/mysql/conf.d/mysql.cnf.disabled \
+    # Create placeholder for custom my.cnf
+    #&& touch /etc/mysql/conf.d/my.cnf \
+    # Set docker settings, these settings always win
+    && printf '[client]\nsocket=/var/lib/mysql/mysql.sock\n\n[server]\nsocket=/var/lib/mysql/mysql.sock\ndatadir=/var/lib/mysql\nsecure-file-priv=/var/lib/mysql-files\nuser=mysql\nskip-host-cache\nskip-name-resolve\n' > /etc/mysql/mysql.conf.d/docker.cnf \
+    \
+    && mkdir /docker-entrypoint-initdb.d
 
 VOLUME /var/lib/mysql
 
-ENTRYPOINT ["docker-entrypoint.sh"]
-
-EXPOSE 3306
+COPY docker-entrypoint.sh /entrypoint.sh
+COPY healthcheck.sh /healthcheck.sh
+ENTRYPOINT ["/entrypoint.sh"]
+HEALTHCHECK CMD /healthcheck.sh
+EXPOSE 3306 33060
 CMD ["mysqld"]
