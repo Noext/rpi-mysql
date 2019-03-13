@@ -1,0 +1,19 @@
+pipeline:
+  build:
+    pull: true
+    image: docker
+    environment:
+      - DOCKER_HOST=unix:///drone/docker.sock
+    secrets: [ docker_login ]  
+    commands:
+      - sleep 10 # give docker enough time to initialize
+      - mkdir ~/.docker
+      - echo $DOCKER_LOGIN > ~/.docker/config.json
+      - docker build --no-cache -f ./docker/Dockerfile -t registry.noext.fr:2083/happymonkey/rpi-mysql:latest .
+      - docker push registry.noext.fr:2083/happymonkey/rpi-mysql:latest
+
+services:
+  docker:
+    image: docker:dind
+    privileged: true
+    command: [ '-H', 'unix:///drone/docker.sock' ]
